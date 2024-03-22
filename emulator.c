@@ -16,7 +16,7 @@ __LL _DSS IIII IIII
 */
 enum {
     ZERO_PAGE_SIZE = 1 << 8, // First 256 bytes are "registers" on stack
-    MEMSIZE = (1 << 16) - ZERO_PAGE_SIZE, // Rest is in heap
+    MEMSIZE = (1 << 16),
     IBIT_READADDR1 = 1 << 8,
     IBIT_READADDR0 = 1 << 9,
     IBIT_WRITEADDR = 1 << 10,
@@ -39,7 +39,6 @@ typedef union {
 enum {
     OP_NONE,
     OP_COPY,
-    OP_DEREF,
     OP_ADD,
     OP_JUMP_IF_ZERO,
     OP_POKE,
@@ -50,7 +49,6 @@ typedef struct {
     word pc;
     word reg_in[3];
     word reg_out;
-    word zeropage[255];
     word *memory;
     bool halted;
 } CPU;

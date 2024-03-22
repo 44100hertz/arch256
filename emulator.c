@@ -10,7 +10,7 @@ typedef uint8_t byte;
 Instruction layout:
 __LL _DSS IIII IIII
   L = number of args 0-3
-  D = Whether to write result to an address (1) or not (0)
+  D = Whether to write back result (to extra provided param)
   S = Whether to read input(s) from an address (1) or immediate (0)
   I = Which of 256 instructions to perform in between.
 */
@@ -28,8 +28,8 @@ typedef union {
         byte operation: 8;
         bool read_addr1: 1;
         bool read_addr0: 1;
-        bool write_addr: 1;
-        byte _pad2: 1;
+        byte write_addr: 1;
+        byte _pad0: 1;
         byte argc: 2;
         byte _pad1: 2;
     };
@@ -39,6 +39,7 @@ typedef union {
 enum {
     OP_NONE,
     OP_COPY,
+    OP_DEREF,
     OP_ADD,
     OP_JUMP_IF_ZERO,
     OP_POKE,
@@ -66,7 +67,7 @@ void free_cpu(CPU cpu) {
 }
 
 void step_cpu(CPU *cpu) {
-    bool debug = true;
+    bool debug = false;
     Instruction ix = { .iword = cpu->memory[cpu->pc++] };
     word write_addr;
     if(debug) printf("instruction %08b %02x; ", ix.iword >> 8, ix.operation);
@@ -113,7 +114,7 @@ int main() {
     }
     int code_start = i;
     // let i = hello.start ;; hello.start is 0
-    cpu.memory[i++] = (2 << IOFFSET_LEN) | (2 << IBIT_WRITEADDR) | OP_COPY;
+    cpu.memory[i++] = (1 << IOFFSET_LEN) | IBIT_WRITEADDR | OP_COPY;
     cpu.memory[i++] = 127;
     cpu.memory[i++] = 0;
     // loop:
@@ -145,13 +146,13 @@ int main() {
 
     cpu.pc = code_start;
 
-    for (int i=0; i<50; ++i) {
-        printf("0x%04x, ", ((cpu.memory[i] & 0xff) << 8) | cpu.memory[i] >> 8);
-    }
-    puts("");
-    puts("");
+    /* for (int i=0; i<50; ++i) { */
+    /*     printf("0x%04x, ", ((cpu.memory[i] & 0xff) << 8) | cpu.memory[i] >> 8); */
+    /* } */
+    /* puts(""); */
+    /* puts(""); */
 
-    for (int i=0; i<10 && !cpu.halted; ++i) {
+    for (int i=0; i<100 && !cpu.halted; ++i) {
         step_cpu(&cpu);
     }
     free_cpu(cpu);

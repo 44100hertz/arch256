@@ -2,129 +2,304 @@ const std = @import("std");
 const expect = std.testing.expect;
 const print = std.debug.print;
 
-const memsize = 1 << 16;
-const word = u16;
+const debug = false;
+const max_run_len = 100;
+
+const memsize = 1 << 8;
+const Word = u8;
+const SWord = i8;
 
 // Instruction layout:
-// __LL _DSS IIII IIII
-//   L = number of args 0-3
-//   D = Whether to write result to an address (1) or not (0)
-//   S = Whether to read input(s) from an address (1) or immediate (0)
-//   I = Which of 256 instructions to perform in between.
+// IIiii SAA
+// I = Instruction kind
+// i = Instruction
+// S = self-modify / zero flag
+// A = dereference args
 
 const Instruction = packed struct {
+    deref1: bool,
+    deref0: bool,
+    self_modify: bool,
     operation: Operation,
-    read_addr1: bool,
-    read_addr0: bool,
-    write_addr: bool,
-    _pad0: bool,
-    argc: u2,
-    _pad1: u2,
+
+    pub fn argc(self: Instruction) u2 {
+        const num_args: u2 = switch (self.operation.kind()) {
+            .one_arg => 1,
+            .two_arg, .unary => 2,
+            .binary => 3,
+        };
+        return num_args - @intFromBool(self.self_modify);
+    }
+
+    pub fn print_info(self: Instruction) void {
+        print("op:{s} d0:{d} d1:{d} sm:{d}", .{
+            @tagName(self.operation),
+            @intFromBool(self.deref0),
+            @intFromBool(self.deref1),
+            @intFromBool(self.self_modify)});
+    }
+
+    pub fn has_writeback(self: Instruction) bool {
+        return self.operation.kind() == Operation.Kind.binary or
+            self.operation.kind() == Operation.Kind.unary;
+    }
+
+    pub fn has_two_inputs(self: Instruction) bool {
+        return self.operation.kind() == Operation.Kind.two_args or
+            (self.operation.kind() == Operation.Kind.binary and !self.self_modify);
+    }
 };
 
-test "Instruction is 16-bit" {
-    try expect(@sizeOf(Instruction) == 2);
+test "Instruction is 8-bit" {
+    try expect(@sizeOf(Instruction) == 1);
 }
 
-const Operation = enum(u8) {
-    none,
+const Operation = enum(u5) {
+    // -- Bank 0: X = Y
+    peek = 0b00_000,
     copy,
-    add,
-    jump_if_zero,
-    poke,
-    halt,
+    deref,
+    getflag,
+    pop,
+    not,
+    negate,
+    invert,
+
+    // -- Bank 1: OP X Y
+    poke = 0b01_000,
+    jumpifz,
+    jumpifnz,
+    setflag,
+    // -- Bank 1.2: OP X
+    push,
+    call,
+    ret,
+    // unused,
+
+    // -- Bank 2: X = Y OP Z
+    add = 0b10_000,
+    sub,
+    // unused,
+    // unused,
+    b_and = 0b10_100,
+    b_or,
+    b_xor,
+    // unused,
+
+    // -- Bank 3: X = Y OP Z (2)
+    u_shiftl = 0b11_000,
+    u_shiftr,
+    s_shiftr,
+    // unused,
+    u_gt = 0b11_100,
+    u_lt,
+    s_gt,
+    s_lt,
+
+    const Kind = enum {
+        unary,
+        binary,
+        one_arg,
+        two_arg,
+    };
+
+    pub fn kind(self: Operation) Operation.Kind {
+        const upper_bank = @intFromEnum(self) & (1 << 2) != 0;
+        const kind_bits: u2 = @truncate(@intFromEnum(self) >> 3);
+        return switch (kind_bits) {
+            0 => Kind.unary,
+            1 => if (upper_bank) Kind.one_arg else Kind.two_arg,
+            2,3 => Kind.binary,
+        };
+    }
 };
 
 const Cpu = struct {
-    pc: word,
-    reg_in: [2]word,
-    reg_out: word,
-    memory: *[memsize]word,
-    allocator: std.mem.Allocator,
+    pc: Word,
+    memory: [memsize]Word,
     halted: bool,
 
-    pub fn init() !Cpu {
-        var aa = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-        var alloc = aa.allocator();
-        return std.mem.zeroInit(Cpu, .{
-            .allocator = alloc,
-            .memory = try alloc.create([memsize]word),
-            .halted = false,
-        });
+    pub fn init() Cpu {
+        return std.mem.zeroInit(Cpu, .{});
     }
 
-    pub fn free(self: Cpu) void {
-        self.allocator.destroy(self.memory);
-    }
-
-    pub fn fetch_next(self: *Cpu) word {
+    pub fn fetch_next(self: *Cpu) Word {
         const out = self.memory[self.pc];
         self.pc +%= 1;
         return out;
     }
 
+    fn signed(w: Word) SWord {
+        return @bitCast(w);
+    }
+
+    fn unsigned(w: SWord) Word {
+        return @bitCast(w);
+    }
+
     pub fn step(self: *Cpu) void {
-        const debug = false;
+        // TODO: implement self modifying bit
+        var args: [3]Word = undefined;
+        var retval: Word = 0;
+
         // Fetch
         const ix: Instruction = @bitCast(self.fetch_next());
-        if (debug) print("instruction {b:0>8} {x:0>2}; ", .{@as(word, @bitCast(ix)) >> 8, @intFromEnum(ix.operation)});
-        var write_addr: word = undefined;
-        if (ix.write_addr) write_addr = self.fetch_next();
-        for (0..ix.argc) |i| {
-            self.reg_in[i] = self.fetch_next();
-            if (debug) print("param {x:0>4}; ", .{self.reg_in[i]});
+        if (debug) {
+            ix.print_info();
+            print("; ", .{});
+        }
+
+        for (0..ix.argc()) |i| {
+            args[i] = self.fetch_next();
+            if (debug) print("param {x:0>2}; ", .{args[i]});
         }
         if (debug) print("\n", .{});
 
         // Read memory
         for (0..2) |i| {
-            const memflag = if (i == 0) ix.read_addr0 else ix.read_addr1;
+            const memflag = if (i == 0) ix.deref0 else ix.deref1;
             if (memflag) {
-                const addr = self.reg_in[i];
-                self.reg_in[i] = self.memory[addr];
-                if (debug) print("read {x:0>4} from {x:0>4}\n", .{self.reg_in[i], addr});
+                var idx = switch(ix.operation.kind()) {
+                    .unary, .two_arg => i,
+                    .binary => i+1,
+                    .one_arg => 0,
+                };
+                if (ix.operation == Operation.deref) idx = 1;
+                const addr = args[idx];
+                args[idx] = self.memory[addr];
+                if (debug) print("read {x:0>2} from {x:0>2}\n", .{args[idx], addr});
             }
+        }
+
+        if (ix.self_modify) {
+            if (ix.operation.kind() == Operation.)
         }
 
         // Perform operation
         switch (ix.operation) {
-            Operation.none => {},
-            Operation.copy => self.reg_out = self.reg_in[0],
-            Operation.add => self.reg_out = self.reg_in[0] + self.reg_in[1],
-            Operation.jump_if_zero => { if (self.reg_in[1] == 0) self.pc = self.reg_in[0]; },
-            Operation.poke => print("{u}", .{self.reg_in[1]}),
-            Operation.halt => self.halted = true,
+            // Bank 0, unary
+            //.peek => {}, // TODO: I/O
+            .copy, .deref => retval = args[1],
+            //.getflag => {}, // TODO: flags
+            //.pop => {}, // TODO: stack
+            .not => retval = if (args[1] == 0) 1 else 0,
+            .negate => retval = unsigned(-signed(args[1])),
+            .invert => retval = ~args[1],
+
+            // Bank 1, two-arg
+            .poke => print("{c}", .{args[1]}),
+            .jumpifz => { if (args[1] == 0) self.pc = args[0]; },
+            .jumpifnz => { if (args[1] != 0) self.pc = args[0]; },
+            .setflag => self.halted = true, // TODO flags
+
+            // Bank 1.2, one-arg
+            //.push => {}, // TODO stack
+            //.call => {}, // TODO stack
+            //.ret => {}, // TODO stack
+
+            // Bank 2/3, binary
+            .add => retval = args[1] +% args[2], // TODO carry
+            .sub => retval = args[1] -% args[2], // TODO carry
+            .b_and => retval = args[1] & args[2],
+            .b_or => retval = args[1] | args[2],
+            .b_xor => retval = args[1] ^ args[2],
+
+            .u_shiftl => retval = args[1] << @truncate(args[2]), // TODO carry
+            .u_shiftr => retval = args[1] >> @truncate(args[2]), // TODO carry
+            .s_shiftr => retval = unsigned(signed(args[1]) >> @truncate(args[2])), // TODO carry
+
+            .u_gt => retval = if (args[1] > args[2]) 1 else 0,
+            .u_lt => retval = if (args[1] < args[2]) 1 else 0,
+            .s_gt => retval = if (signed(args[1]) > signed(args[2])) 1 else 0,
+            .s_lt => retval = if (signed(args[1]) < signed(args[2])) 1 else 0,
+            else => {},
         }
 
         // Writeback
-        if (ix.write_addr) {
-            self.memory[write_addr] = self.reg_out;
-            if (debug) print("wrote {x:0>4} to {x:0>4}\n", .{self.reg_out, write_addr});
+        if (ix.has_writeback()) {
+            self.memory[args[0]] = retval;
+            if (debug) print("wrote {x:0>2} to {x:0>2}\n", .{retval, args[0]});
         }
     }
 
     pub fn run(self: *Cpu) void {
-        for (1..100) |_| {
+        for (0..max_run_len) |_| {
             self.step();
             if (self.halted) break;
         }
     }
 };
 
-// From C "assembler"...
-const hello_binary = [_]word{
-    0x0048, 0x0065, 0x006c, 0x006c, 0x006f, 0x002c, 0x0020, 0x0077, 0x006f,
-    0x0072, 0x006c, 0x0064, 0x0021, 0x000a, 0x0000, 0x1401, 0x007f, 0x0000,
-    0x1200, 0x007f, 0x0601, 0x0080, 0x2502, 0x007f, 0x0001, 0x007f, 0x2104,
-    0x0000, 0x0080, 0x1003, 0x0021, 0x2003, 0x0011, 0x0000, 0x0005
-};
-
-const hello_start = 15;
-
 pub fn main() !void {
-    var cpu = try Cpu.init();
-    defer cpu.free();
-    for (hello_binary, 0..) |w, i| cpu.memory[i] = w;
-    cpu.pc = hello_start;
+    var cpu = Cpu.init();
+    var assembler = Assembler.new(&cpu.memory);
+    assembler.write_hello();
     cpu.run();
 }
+
+const Assembler = struct {
+    addr: Word,
+    binary: *[memsize]Word,
+
+    pub fn new(binary: *[memsize]Word) Assembler {
+        return Assembler {
+            .addr = 0,
+            .binary = binary,
+        };
+    }
+
+    fn push_word(self: *Assembler, word: Word) void {
+        self.binary[self.addr] = word;
+        self.addr += 1;
+    }
+
+    fn push_instruction(self: *Assembler, op: Operation, flags: u3) void {
+        const inst = Instruction {
+            .operation = op,
+            .deref0 = flags & 4 != 0,
+            .deref1 = flags & 2 != 0,
+            .self_modify = flags & 1 != 0,
+        };
+        self.push_word(@bitCast(inst));
+    }
+
+    pub fn write_hello(self: *Assembler) void {
+        // let i = hello.start
+        self.push_instruction(Operation.copy, 0b000);
+        self.push_word(0x7f);
+        const hello_start = self.addr;
+        self.push_word(0);
+        const loop_start = self.addr;
+        // loop:
+        // let char = *i ;;
+        self.push_instruction(Operation.deref, 0b110);
+        self.push_word(0x80);
+        self.push_word(0x7f);
+        // jmpz char done
+        self.push_instruction(Operation.jumpifz, 0b010);
+        const addr_done = self.addr;
+        self.push_word(0);
+        self.push_word(0x80);
+        // i = i + 1
+        self.push_instruction(Operation.add, 0b100);
+        self.push_word(0x7f);
+        self.push_word(0x7f);
+        self.push_word(0x1);
+        // poke TERM_WRITE char
+        self.push_instruction(Operation.poke, 0b010);
+        self.push_word(0);
+        self.push_word(0x80);
+        // jmpz loop 0
+        self.push_instruction(Operation.jumpifz, 0b000);
+        self.push_word(loop_start);
+        self.push_word(0);
+        // halt
+        self.binary[addr_done] = self.addr;
+        self.push_instruction(Operation.setflag, 0b000);
+        self.push_word(1);
+        const hello = "Hello, World!\n";
+        self.binary[hello_start] = self.addr;
+        for (hello) |c| self.push_word(c);
+        self.push_word(0);
+    }
+};
